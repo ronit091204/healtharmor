@@ -1,27 +1,30 @@
 import tensorflow as tf
 from keras.preprocessing.image import ImageDataGenerator
-from keras.models import Sequential, load_model
+from keras.models import Sequential, load_model, model_from_json
 from keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout, BatchNormalization
 from keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
 from keras.optimizers import Adam
 from keras.preprocessing import image
 import numpy as np
 import os
+import pickle
+import streamlit as st
 
-# Data augmentation and normalization
+# Data Augmentation and Normalization
 train_datagen = ImageDataGenerator(
     rescale=1./255,
-    shear_range=0.2,
-    zoom_range=0.2,
-    rotation_range=20,
+    rotation_range=40,
     width_shift_range=0.2,
     height_shift_range=0.2,
+    shear_range=0.2,
+    zoom_range=0.2,
     horizontal_flip=True,
-    brightness_range=[0.8, 1.2]
+    fill_mode='nearest'
 )
 
 test_datagen = ImageDataGenerator(rescale=1./255)
 
+# Load dataset
 training_set = train_datagen.flow_from_directory(
     r'dataset\train',
     target_size=(64, 64),
@@ -36,53 +39,60 @@ test_set = test_datagen.flow_from_directory(
     class_mode='categorical'
 )
 
-# Model architecture
+# Model Architecture
+cnn = Sequential()
+
+cnn.add(Conv2D(filters=64, kernel_size=3, activation='relu', input_shape=[64, 64, 3]))
+cnn.add(BatchNormalization())
+cnn.add(MaxPooling2D(pool_size=2, strides=2))
+
+cnn.add(Conv2D(filters=128, kernel_size=3, activation='relu'))
+cnn.add(BatchNormalization())
+cnn.add(MaxPooling2D(pool_size=2, strides=2))
+
+cnn.add(Conv2D(filters=256, kernel_size=3, activation='relu'))
+cnn.add(BatchNormalization())
+cnn.add(MaxPooling2D(pool_size=2, strides=2))
+
+cnn.add(Flatten())
+
+cnn.add(Dense(units=512, activation='relu'))
+cnn.add(Dropout(0.5))
+
+cnn.add(Dense(units=256, activation='relu'))
+cnn.add(Dropout(0.3))
+
+cnn.add(Dense(units=23, activation='softmax'))
+
+# Optimizer with Learning Rate Scheduler
+optimizer = Adam(lr=0.001)
+lr_scheduler = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-7, verbose=1)
+
+cnn.compile(optimizer=optimizer, loss='categorical_crossentropy', metrics=['accuracy'])
+
+# Model Checkpoint and Early Stopping
 model_path = "best_model.h5"
+checkpoint = ModelCheckpoint(model_path, monitor='val_accuracy', save_best_only=True, verbose=1)
 
-if not os.path.exists(model_path):
-    cnn = Sequential()
-    
-    cnn.add(Conv2D(filters=32, kernel_size=3, activation='relu', input_shape=[64, 64, 3]))
-    cnn.add(BatchNormalization())
-    cnn.add(MaxPooling2D(pool_size=2, strides=2))
-    
-    cnn.add(Conv2D(filters=64, kernel_size=3, activation='relu'))
-    cnn.add(BatchNormalization())
-    cnn.add(MaxPooling2D(pool_size=2, strides=2))
-    
-    cnn.add(Flatten())
-    
-    cnn.add(Dense(units=128, activation='relu'))
-    cnn.add(Dropout(0.5))
-    
-    cnn.add(Dense(units=64, activation='relu'))
-    cnn.add(Dropout(0.3))
-    
-    cnn.add(Dense(units=23, activation='softmax'))
+# Model Training with early stopping based on validation accuracy
+history = cnn.fit(
+    x=training_set,
+    validation_data=test_set,
+    epochs=100,  # Increased epochs
+    callbacks=[checkpoint, lr_scheduler, 
+               EarlyStopping(monitor='val_accuracy', patience=5, restore_best_weights=True, verbose=1)]  # Early stopping based on validation accuracy
+)
 
-    # Optimizer with learning rate scheduler
-    optimizer = Adam(lr=0.0005)
-    lr_scheduler = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-7, verbose=1)
+# Load class indices from pickle file
+with open("class_indices.pkl", "rb") as pkl_file:
+    class_indices = pickle.load(pkl_file)
 
-    checkpoint = ModelCheckpoint(model_path, monitor='val_loss', save_best_only=True, verbose=1)
-    early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True, verbose=1)
+# Load model architecture from JSON file
+with open("model_architecture.json", "r") as json_file:
+    model_json = json_file.read()
 
-    cnn.compile(optimizer=optimizer, loss='categorical_crossentropy', metrics=['accuracy'])
-
-    # Fit model with callbacks
-    history = cnn.fit(
-        x=training_set,
-        validation_data=test_set,
-        epochs=100,
-        callbacks=[checkpoint, early_stop, lr_scheduler]
-    )
-else:
-    cnn = load_model(model_path)
-
-# Evaluate the model on test set and print accuracy
-loss, accuracy = cnn.evaluate(test_set)
-print(f"Test Loss: {loss:.4f}")
-print(f"Test Accuracy: {accuracy*100:.2f}%")
+cnn = model_from_json(model_json)
+cnn.load_weights("model_weights.h5")
 
 # Prediction function
 def make_prediction(image_path, class_indices):
@@ -97,8 +107,51 @@ def make_prediction(image_path, class_indices):
 
     return result, predicted_class_label
 
-result, predicted_class = make_prediction(
-    r'dataset\train\Bullous Disease Photos\benign-familial-chronic-pemphigus-2.jpg', 
-    training_set.class_indices
-)
-print(result, predicted_class)
+# Streamlit web app
+st.title("Improved Image Classification Web App")
+
+# Navigation Bar
+st.markdown("""
+<style>
+    .navbar {
+        display: flex;
+        justify-content: space-between;
+        padding: 1rem;
+        background-color: #f4f4f4;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown('<div class="navbar"><a href="#about">About</a></div>', unsafe_allow_html=True)
+
+uploaded_file = st.file_uploader("Choose an image...", type="jpg")
+
+if uploaded_file is not None:
+    image_path = "temp_image.jpg"
+    with open(image_path, "wb") as buffer:
+        buffer.write(uploaded_file.getvalue())
+
+    result, predicted_class = make_prediction(image_path, class_indices)
+
+    st.image(uploaded_file, caption=f"Uploaded Image", use_column_width=True)
+    st.write("")
+    st.write(f"Prediction Result: {predicted_class}")
+    st.write(f"Confidence: {result[0][np.argmax(result)]*100:.2f}%")
+
+    os.remove(image_path)
+
+# Footer
+st.markdown("""
+<style>
+    .footer {
+        position: fixed;
+        bottom: 0;
+        width: 100%;
+        background-color: #f4f4f4;
+        padding: 1rem;
+        text-align: center;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown('<div class="footer"><a href="#privacy">Privacy</a> | <a href="#control">Control</a> | <a href="#about">About</a></div>', unsafe_allow_html=True)
